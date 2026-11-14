@@ -11,17 +11,25 @@ st.set_page_config(page_title="Intraday Liquidity Trap Terminal", layout="wide")
 st.title("🚀 Intraday Institutional Trap & Telegram Scanner")
 st.markdown("Live charts dekhein, liquidity traps ko analyze karein, aur ek click par Telegram par alert bhejein.")
 
+# --- TELEGRAM AUTO-LOAD FROM SECRETS (FIXED) ---
+TELEGRAM_BOT_TOKEN = st.secrets.get("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID = st.secrets.get("TELEGRAM_CHAT_ID", "")
+
 # --- SIDEBAR CONFIG ---
 st.sidebar.header("⚙️ Settings & Watchlist")
 
-# Telegram Credentials Input directly from UI (Taaki code mein bar-bar change na karna pade)
-st.sidebar.subheader("📱 Telegram Settings")
-TELEGRAM_BOT_TOKEN = st.sidebar.text_input("Bot Token", type="password", placeholder="123456:ABC-DEF...")
-TELEGRAM_CHAT_ID = st.sidebar.text_input("Chat ID", placeholder="123456789")
+# Telegram Status Indicator
+st.sidebar.subheader("📱 Telegram Connection")
+if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
+    st.sidebar.success("✅ Telegram Connected & Ready!")
+else:
+    st.sidebar.warning("⚠️ Secrets set nahi hain. Manual details daalein:")
+    TELEGRAM_BOT_TOKEN = st.sidebar.text_input("Bot Token", type="password", placeholder="123456:ABC-DEF...")
+    TELEGRAM_CHAT_ID = st.sidebar.text_input("Chat ID", placeholder="123456789")
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("📊 Stock / Index Selector")
-watchlist_default = ["^NSEI", "^NSEBANK", "RELIANCE.NS", "TCS.NS", "HDFCBANK.NS", "INFY.NS"]
+watchlist_default = ["^NSEI", "^NSEBANK", "RELIANCE.NS", "TCS.NS", "HDFCBANK.NS", "INFY.NS", "ICICIBANK.NS"]
 selected_symbol = st.sidebar.selectbox("Choose Symbol to View Chart", watchlist_default)
 
 period = st.sidebar.selectbox("Data Period", ["1d", "5d", "1mo"], index=1)
@@ -76,13 +84,17 @@ def analyze_stock(sym, per, inter, lb, vol_mult):
         if (curr['Low'] < curr['Swing_Low']) and (curr['Close'] > curr['Swing_Low']):
             if high_vol and (curr['Close'] > curr['VWAP']):
                 df.iloc[i, df.columns.get_loc('Signal')] = 1
-                signals_list.append((df.index[i], 'BUY', curr['Close'], curr['VWAP']))
+                sl = curr['Low'] - (curr['High'] * 0.001)
+                tp = curr['Close'] + ((curr['Close'] - sl) * 2)
+                signals_list.append((df.index[i], 'BUY', curr['Close'], sl, tp, curr['VWAP']))
                 
         # Bearish Trap (Sell)
         elif (curr['High'] > curr['Swing_High']) and (curr['Close'] < curr['Swing_High']):
             if high_vol and (curr['Close'] < curr['VWAP']):
                 df.iloc[i, df.columns.get_loc('Signal')] = -1
-                signals_list.append((df.index[i], 'SELL', curr['Close'], curr['VWAP']))
+                sl = curr['High'] + (curr['High'] * 0.001)
+                tp = curr['Close'] - ((sl - curr['Close']) * 2)
+                signals_list.append((df.index[i], 'SELL', curr['Close'], sl, tp, curr['VWAP']))
                 
     return df, signals_list
 
@@ -95,14 +107,12 @@ else:
     buy_sigs = data[data['Signal'] == 1]
     sell_sigs = data[data['Signal'] == -1]
     
-    # Metrics Row
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("Selected Symbol", selected_symbol)
     col2.metric("Current Price", f"₹{data['Close'].iloc[-1]:.2f}")
     col3.metric("Buy Setups Found", len(buy_sigs))
     col4.metric("Sell Setups Found", len(sell_sigs))
     
-    # Interactive Chart
     fig = go.Figure()
     fig.add_trace(go.Candlestick(x=data.index, open=data['Open'], high=data['High'], low=data['Low'], close=data['Close'], name="Price"))
     fig.add_trace(go.Scatter(x=data.index, y=data['VWAP'], mode='lines', line=dict(color='orange', width=1.5), name='VWAP'))
@@ -119,29 +129,43 @@ else:
     st.markdown("---")
     st.subheader("⚡ Quick Watchlist Scanner & Telegram Alert")
     
-    if st.button("🔍 Scan Entire Watchlist & Send Telegram Alerts Now"):
-        watchlist = ["^NSEI", "^NSEBANK", "RELIANCE.NS", "TCS.NS", "HDFCBANK.NS", "INFY.NS"]
+    col_btn1, col_btn2 = st.columns([2, 1])
+    with col_btn1:
+        scan_clicked = st.button("🔍 Scan Entire Watchlist & Send Telegram Alerts Now", use_container_width=True)
+    with col_btn2:
+        test_clicked = st.button("🔔 Send Test Telegram Ping", use_container_width=True)
+
+    if test_clicked:
+        success, resp = send_telegram_alert(TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, "✅ *Test Alert:* Aapka Intraday Trap Scanner Telegram se successfully jud gaya hai!")
+        if success:
+            st.success("Test message aapke Telegram par pahunch gaya hai!")
+        else:
+            st.error(f"Error: {resp}")
+
+    if scan_clicked:
         found_alerts = []
-        
         with st.spinner("Scanning all stocks in watchlist..."):
-            for sym in watchlist:
+            for sym in watchlist_default:
                 df_temp, sigs_temp = analyze_stock(sym, period, interval, lookback, vol_multiplier)
                 if sigs_temp:
-                    latest_sig = sigs_temp[-1] # (time, type, close, vwap)
-                    found_alerts.append(f"📌 *{sym}* -> ⚡ **{latest_sig[1]}** at ₹{latest_sig[2]:.2f} (VWAP: ₹{latest_sig[3]:.2f})")
+                    latest = sigs_temp[-1] # (time, type, close, sl, tp, vwap)
+                    icon = "🟢" if latest[1] == "BUY" else "🔴"
+                    found_alerts.append(
+                        f"{icon} *{sym}* ({latest[1]})\n"
+                        f"   Entry: `₹{latest[2]:.2f}` | SL: `₹{latest[3]:.2f}` | TP: `₹{latest[4]:.2f}`"
+                    )
                     
         if found_alerts:
             st.success(f"{len(found_alerts)} active setups mil gaye!")
-            msg = "🚨 *INTRADAY TRAP SCANNER ALERT* 🚨\n\n" + "\n".join(found_alerts)
+            msg = "🚨 *INTRADAY TRAP SCANNER ALERT* 🚨\n\n" + "\n\n".join(found_alerts)
             
-            # Send via Telegram
             success, resp = send_telegram_alert(TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, msg)
             if success:
-                st.success("✅ Telegram par alert successfully bhej diya gaya hai!")
+                st.success("✅ Telegram par alert bhej diya gaya hai!")
             else:
-                st.warning(f"⚠️ Dashboard par alerts mil gaye, par Telegram error aaya: {resp}")
+                st.warning(f"⚠️ Alerts mile, par Telegram error aaya: {resp}")
                 
             for alert in found_alerts:
-                st.markdown(f"- {alert}")
+                st.markdown(alert)
         else:
             st.info("Watchlist mein abhi kisi bhi stock par active trap signal nahi mila.")
